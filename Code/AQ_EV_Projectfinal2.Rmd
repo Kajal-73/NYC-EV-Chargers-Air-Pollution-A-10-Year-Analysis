@@ -1,0 +1,1037 @@
+---
+title: "Longitudinal"
+author: "Kajal Gupta"
+date: "2025-04-17"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Step 1: Clean and Prepare EV Data (2014–2024)
+
+```{r, warning=FALSE, message=FALSE}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+# Load EV station dataset
+ev_data <- read_csv("EV_CS_NYC.csv")
+colnames(ev_data)
+# Clean and extract installation year, assign NYC boroughs
+ev_data_clean <- ev_data %>%
+  mutate(
+    Open_Date = mdy(`Open Date`),
+    Open_Year = year(Open_Date),
+    City = str_to_upper(str_trim(City)),
+    BOROUGH = case_when(
+      City %in% c("NEW YORK", "MANHATTAN") ~ "MANHATTAN",
+      City == "BROOKLYN" ~ "BROOKLYN",
+      City == "BRONX" ~ "BRONX",
+      City == "QUEENS" ~ "QUEENS",
+      City == "STATEN ISLAND" ~ "STATEN ISLAND",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(Open_Year >= 2014 & Open_Year <= 2024, !is.na(BOROUGH))
+
+```
+
+
+
+
+
+
+Step 2: Aggregate EV Data by BOROUGH + YEAR and Keep Relevant Covariates
+```{r, warning=FALSE, message=FALSE}
+ev_summary <- ev_data_clean %>%
+  group_by(BOROUGH, Open_Year) %>%
+  summarise(
+    Stations = n(),
+    Total_Level2 = sum(`EV Level2 EVSE Num`, na.rm = TRUE),
+    Total_DCFC = sum(`EV DC Fast Count`, na.rm = TRUE),
+    Public_Pct = mean(`Groups With Access Code` == "Public", na.rm = TRUE),
+    Avg_Level2_Per_Station = mean(`EV Level2 EVSE Num`, na.rm = TRUE),
+    Avg_DCFC_Per_Station = mean(`EV DC Fast Count`, na.rm = TRUE)
+  ) %>%
+  rename(Year = Open_Year) %>%
+  arrange(BOROUGH, Year) %>%
+  group_by(BOROUGH) %>%
+  mutate(
+    EV_Growth_Rate = (Stations - lag(Stations)) / lag(Stations)
+  ) %>%
+  ungroup()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+Step 3: Clean and Filter Air Quality Data
+```{r, warning=FALSE, message=FALSE}
+air_quality <- read_csv("Air_Quality.csv") %>%
+  mutate(
+    Start_Date = mdy(Start_Date),
+    Year = year(Start_Date),
+    `Geo Place Name` = str_trim(`Geo Place Name`),
+    Region = str_to_upper(`Geo Place Name`)
+  )
+
+# Map Geo.Place.Name to Boroughs
+borough_keywords <- list(
+  "BRONX" = c("BRONX", "FORDHAM", "MORRISANIA", "KINGSBRIDGE"),
+  "BROOKLYN" = c("BROOKLYN", "BEDFORD", "EAST NEW YORK", "BUSHWICK"),
+  "MANHATTAN" = c("MANHATTAN", "HARLEM", "CHELSEA", "GRAMERCY", "TRIBECA"),
+  "QUEENS" = c("QUEENS", "JAMAICA", "FLUSHING", "ASTORIA"),
+  "STATEN ISLAND" = c("STATEN ISLAND", "TOTTENVILLE", "ST. GEORGE")
+)
+
+get_borough <- function(region) {
+  if (is.na(region)) return(NA)
+  for (b in names(borough_keywords)) {
+    if (any(str_detect(region, borough_keywords[[b]]))) return(b)
+  }
+  return(NA)
+}
+
+air_quality$BOROUGH <- sapply(air_quality$Region, get_borough)
+
+air_quality <- air_quality %>%
+  filter(!is.na(BOROUGH), Year >= 2014 & Year <= 2024)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+Step 4: Merge EV + Air Quality Data by BOROUGH + YEAR
+
+```{r, warning=FALSE, message=FALSE}
+merged_data <- air_quality %>%
+  left_join(ev_summary, by = c("BOROUGH", "Year"))
+colnames(merged_data)
+```
+
+
+
+
+
+
+
+
+
+Step 5: Add Derived Covariates
+```{r, warning=FALSE, message=FALSE}
+merged_data <- merged_data %>%
+  rename(Data_Value = `Data Value`)
+
+# Define borough areas (in square miles)
+borough_area_mi2 <- c(
+  "BRONX" = 42,
+  "BROOKLYN" = 69,
+  "MANHATTAN" = 22,
+  "QUEENS" = 109,
+  "STATEN ISLAND" = 58
+)
+
+merged_data <- merged_data %>%
+  mutate(
+    EV_Station_Density = Stations / borough_area_mi2[BOROUGH],
+    Time_Since_EV_Adoption = Year - 2014,
+    Level2_to_DCFC_Ratio = ifelse(Total_DCFC > 0, Total_Level2 / Total_DCFC, NA),
+    Chargers_Per_Station = (Total_Level2 + Total_DCFC) / Stations
+  ) %>%
+  group_by(BOROUGH, Name) %>%
+  arrange(Year) %>%
+  mutate(
+    Pollutant_Change = Data_Value - lag(Data_Value),
+    Pollutant_Rate_Change = (Data_Value - lag(Data_Value)) / lag(Data_Value)
+  ) %>%
+  ungroup()
+
+```
+
+
+
+
+
+Step 6: Final Variable Selection and Save
+```{r, warning=FALSE, message=FALSE}
+final_data <- merged_data %>%
+  select(
+    BOROUGH, Year, `Geo Place Name`, Name, Measure, `Measure Info`, Data_Value,
+    Pollutant_Change, Pollutant_Rate_Change,
+    Stations, Total_Level2, Total_DCFC,
+    Public_Pct, Avg_Level2_Per_Station, Avg_DCFC_Per_Station,
+    EV_Growth_Rate, EV_Station_Density, Chargers_Per_Station,
+    Level2_to_DCFC_Ratio, Time_Since_EV_Adoption
+  )
+
+write_csv(final_data, "Final_NYC_Longitudinal_EV_AQ_2014_2024.csv")
+print("✅ Final dataset with all derived covariates saved!")
+
+```
+
+
+
+```{r, warning=FALSE, message=FALSE}
+analysis_data <- read.csv("Final_NYC_Longitudinal_EV_AQ_2014_2024.csv")
+colnames(analysis_data)
+# Check NAs column-wise
+colSums(is.na(final_data))
+str(analysis_data)
+```
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+# Step 1: Keep borough-years where EV data exists
+analysis_data_filtered <- analysis_data %>%
+  filter(Year >= 2014, !is.na(Stations))  # Drop 2020 + boroughs with no EV stations that year
+
+# Step 2 (optional): check how many regions per borough-year remain
+table(analysis_data_filtered$BOROUGH, analysis_data_filtered$Year)
+
+# Step 3 (optional): Save filtered data
+write.csv(analysis_data_filtered, "Model_Ready_EV_AQ_Data.csv", row.names = FALSE)
+```
+
+
+
+
+```{r, warning=FALSE, message=FALSE}
+model_data <- read.csv("Model_Ready_EV_AQ_Data.csv")
+colnames(model_data)
+# Check NAs column-wise
+colSums(is.na(model_data))
+str(model_data)
+nrow(model_data)
+model_data <- model_data %>%
+  select(-Level2_to_DCFC_Ratio, -Avg_DCFC_Per_Station, -Avg_Level2_Per_Station)
+colnames(model_data)
+# Check NAs column-wise
+colSums(is.na(model_data))
+nrow(model_data)
+str(model_data)
+write.csv(model_data, "Clean_Model_Ready_EV_AQ_Data.csv", row.names = FALSE)
+print("✅ Clean modeling dataset saved as 'Clean_Model_Ready_EV_AQ_Data.csv'")
+```
+
+### ANALYSIS 
+
+
+Load Dataset
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(psych)
+library(corrplot)
+library(plm)
+library(tidyr)
+library(ggthemes)
+library(readr)
+
+# Load cleaned data
+model_data <- read.csv("Clean_Model_Ready_EV_AQ_Data.csv")
+colSums(is.na(model_data))
+nrow(model_data)
+```
+
+
+
+\newpage
+Step 1: Descriptive Statistics
+```{r, warning=FALSE, message=FALSE}
+# Summary statistics for all numeric variables
+desc_stats <- model_data %>%
+  select(where(is.numeric)) %>%
+  psych::describe()
+
+print(desc_stats)
+
+```
+
+
+
+
+
+
+\newpage
+Step 2: EDA (Exploratory Data Analysis)
+```{r, warning=FALSE, message=FALSE}
+# Pollutant frequency
+table(model_data$Name)
+
+# Observation count per borough/year
+table(model_data$BOROUGH, model_data$Year)
+
+# Mean pollution by borough
+model_data %>%
+  group_by(BOROUGH) %>%
+  summarise(
+    Mean_Pollution = mean(Data_Value),
+    SD = sd(Data_Value),
+    Min = min(Data_Value),
+    Max = max(Data_Value),
+    n = n()
+  )
+
+
+
+library(knitr)
+library(kableExtra)
+library(dplyr)
+
+model_data %>%
+  group_by(BOROUGH) %>%
+  summarise(
+    Mean = mean(Data_Value),
+    SD = sd(Data_Value),
+    Min = min(Data_Value),
+    Max = max(Data_Value),
+    Observations = n()
+  ) %>%
+  rename(Borough = BOROUGH) %>%
+  mutate(across(Mean:Max, ~round(., 2))) %>%  # Round numeric columns
+  kable(
+    caption = "Summary of Pollution Levels by NYC Borough",
+    align = c('l', rep('c', 4)),
+    col.names = c("Borough", "Mean", "Std Dev", "Minimum", "Maximum", "Obs")
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE,
+    font_size = 14,
+    position = "center"
+  ) %>%
+  add_header_above(c(" " = 1, "Pollution Concentration" = 4, " " = 1)) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2:5, background = "#f7f7f7") %>%
+  footnote(
+    general = "Data shows average pollution levels across monitoring sites",
+    general_title = "Note:",
+    footnote_as_chunk = TRUE
+  )
+```
+
+```{r, warning=FALSE, message=FALSE}
+# Load required packages
+library(knitr)
+library(dplyr)
+
+# Create the frequency table and convert to a tidy data frame
+borough_year_counts <- as.data.frame(table(model_data$BOROUGH, model_data$Year)) %>%
+  rename(Borough = Var1, Year = Var2, Count = Freq) %>%
+  pivot_wider(names_from = Year, values_from = Count) %>%
+  arrange(Borough)
+
+# Create nicely formatted kable table
+kable(borough_year_counts, 
+      caption = "Air Quality Observations by Borough and Year",
+      align = c('l', rep('c', ncol(borough_year_counts)-1))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE,
+                font_size = 12) %>%
+  add_header_above(c(" " = 1, "Number of Observations by Year" = ncol(borough_year_counts)-1)) %>%
+  column_spec(1, bold = TRUE) %>%
+  footnote(general = "Data shows monitoring frequency across NYC boroughs",
+           general_title = "Note:",
+           footnote_as_chunk = TRUE)
+```
+
+
+
+
+
+\newpage
+Step 3: Visualizations
+
+3.1 Profile Plot (Pollution over Time by Borough)
+```{r, warning=FALSE, message=FALSE}
+ggplot(model_data, aes(x = Year, y = Data_Value, group = BOROUGH, color = BOROUGH)) +
+  stat_summary(fun = mean, geom = "line", size = 1.2) +
+  stat_summary(fun = mean, geom = "point", size = 2) +
+  labs(title = "Profile Plot: Air Pollution Trends by Borough (2014–2024)",
+       x = "Year", y = "Mean Pollution Level") +
+  theme_minimal()
+
+```
+
+
+
+
+\newpage
+3.2: Distribution of Pollution Levels
+```{r, warning=FALSE, message=FALSE}
+ggplot(model_data, aes(x = Data_Value, fill = BOROUGH)) +
+  geom_histogram(alpha = 0.6, bins = 30, position = "identity") +
+  labs(title = "Distribution of Pollution Levels",
+       x = "Pollution Level", y = "Count") +
+  theme_classic()
+
+```
+
+
+
+
+\newpage
+3.3: EV Density vs Pollution
+```{r, warning=FALSE, message=FALSE}
+ggplot(model_data, aes(x = EV_Station_Density, y = Data_Value, color = BOROUGH)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(title = "EV Station Density vs Air Pollution",
+       x = "EV Station Density", y = "Pollution Level") +
+  theme_minimal()
+
+```
+
+
+
+
+
+\newpage
+Step 4: Correlation Matrix
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Keep only numeric columns
+num_data <- model_data %>% select(where(is.numeric))
+
+# Compute correlation matrix
+cor_matrix <- cor(num_data, use = "complete.obs")
+
+# Tidy the matrix
+cor_df <- as.data.frame(as.table(cor_matrix)) %>%
+  filter(Var1 != Var2) %>%
+  arrange(desc(abs(Freq))) %>%
+  distinct() %>%
+  top_n(20, abs(Freq))  # Top 20 strongest correlations
+
+# View as table or use gt/table
+print(cor_df)
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+library(reshape2)
+
+melted_cor <- melt(cor_matrix)
+
+ggplot(melted_cor, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "red", high = "blue", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab",
+                       name = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+  coord_fixed()
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+set.seed(0)
+library(igraph)
+
+# Create correlation matrix
+cor_matrix[lower.tri(cor_matrix, diag = TRUE)] <- NA
+edges <- as.data.frame(as.table(cor_matrix)) %>%
+  filter(!is.na(Freq), abs(Freq) > 0.5)
+
+graph <- graph_from_data_frame(edges, directed = FALSE)
+
+plot(graph, edge.width = abs(E(graph)$Freq)*5,
+     edge.color = ifelse(E(graph)$Freq > 0, "darkolivegreen", "cyan"),
+     vertex.size = 25,
+     vertex.label.cex = 0.8)
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+# Adjust margins: c(bottom, left, top, right)
+par(mar = c(5, 10, 4, 2))  # Increase left margin
+
+target_cor <- cor(num_data, use = "complete.obs")[, "Data_Value"] %>%
+  sort(decreasing = TRUE)
+
+barplot(target_cor, las = 2, col = ifelse(target_cor > 0, "skyblue", "salmon"),
+        main = "Correlation with Air Pollution (Data_Value)", horiz = TRUE,
+        cex.names = 0.7)  
+```
+
+\newpage
+Step 5: Fixed Effects Model 
+```{r, warning=FALSE, message=FALSE}
+model_data <- model_data %>%
+  group_by(BOROUGH, Geo.Place.Name, Name) %>%
+  mutate(row_num = row_number(),
+         Panel_ID = paste(BOROUGH, Geo.Place.Name, Name, row_num, sep = "_")) %>%
+  ungroup()
+
+panel_data <- pdata.frame(model_data, index = c("Panel_ID", "Year"))
+table(duplicated(model_data[c("Panel_ID", "Year")]))  # Should be all FALSE now
+
+panel_data <- pdata.frame(model_data, index = c("BOROUGH", "Year"))
+
+fe_model <- plm(
+  Data_Value ~ EV_Station_Density + Public_Pct + Time_Since_EV_Adoption,
+  data = panel_data,
+  model = "within"
+)
+
+# Summarize the model
+summary(fe_model)
+
+library(lmtest)
+library(sandwich)
+
+coeftest(fe_model, vcov = vcovHC(fe_model, type = "HC1"))
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(plm)
+library(broom)
+library(knitr)
+library(kableExtra)
+
+# Tidy model
+tidy_fe <- tidy(fe_model)
+
+# Format for presentation
+tidy_fe <- tidy_fe %>%
+  mutate(Significance = case_when(
+    p.value < 0.001 ~ "***",
+    p.value < 0.01 ~ "**",
+    p.value < 0.05 ~ "*",
+    p.value < 0.1 ~ ".",
+    TRUE ~ ""
+  ))
+
+# Display as labeled table
+kable(tidy_fe[, c("term", "estimate", "std.error", "statistic", "p.value", "Significance")],
+      col.names = c("Variable", "Coefficient", "Std. Error", "t-value", "p-value", "Signif."),
+      digits = 3,
+      caption = "Fixed Effects Panel Model: Predicting Air Pollution (Data\\_Value)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))
+
+```
+
+
+
+
+
+\newpage
+Step 6: Save Results
+```{r, warning=FALSE, message=FALSE}
+# Save descriptive stats
+write.csv(desc_stats, "Descriptive_Stats.csv")
+
+# Save plots
+ggsave("Profile_Plot.png", width = 8, height = 5)
+ggsave("EV_vs_Pollution.png", width = 8, height = 5)
+
+```
+
+
+\newpage
+Time-Series Analysis
+```{r, warning=FALSE, message=FALSE}
+# Aggregate by Year (NYC overall)
+nyc_pollution_ts <- model_data %>%
+  group_by(Year) %>%
+  summarise(Pollution = mean(Data_Value, na.rm = TRUE))
+
+ts_data <- ts(nyc_pollution_ts$Pollution, start = min(nyc_pollution_ts$Year))
+
+# Fit ARIMA model
+library(forecast)
+auto_model <- auto.arima(ts_data)
+summary(auto_model)
+
+# Forecast 3 years ahead
+forecasted <- forecast(auto_model, h = 3)
+
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+autoplot(forecasted) +
+  labs(title = "Forecasted Pollution Levels", y = "Pollution") +
+  theme_minimal()
+
+```
+
+Simple Trend Plot (Profile Plot)
+```{r, warning=FALSE, message=FALSE}
+nyc_profile_plot <- ggplot(nyc_pollution_ts, aes(x = Year, y = Pollution)) +
+  geom_line(color = "#1f77b4", size = 1.2) +
+  geom_point(size = 2) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed", color = "#ff7f0e") +
+  labs(title = "Profile Plot: Annual Average Pollution Levels in NYC",
+       y = "Pollutant Value",
+       x = "Year") +
+  theme_minimal()
+nyc_profile_plot
+ggsave("Profile_Plot_NYC.png", nyc_profile_plot, width = 8, height = 5)
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(knitr)
+library(kableExtra)
+
+# Create a data frame with the key values
+arima_summary <- data.frame(
+  Metric = c(
+    "Selected Model", 
+    "Forecasted Mean", 
+    "Standard Error of Mean", 
+    "Residual Variance (σ²)", 
+    "AIC",
+    "AICc",
+    "BIC", 
+    "Root Mean Square Error (RMSE)", 
+    "Mean Absolute Error (MAE)", 
+    "Mean Absolute Percentage Error (MAPE)", 
+    "Mean Absolute Scaled Error (MASE)", 
+    "Lag-1 Autocorrelation (ACF1)"
+  ),
+  Value = c(
+    "ARIMA(0,0,0) with non-zero mean", 
+    round(18.5654, 3),
+    round(1.6745, 3),
+    round(28.39, 2),
+    round(58.6, 2),
+    round(60.6, 2),
+    round(58.99, 2),
+    round(5.0235, 3),
+    round(4.4549, 3),
+    paste0(round(24.43, 2), "%"),
+    round(0.643, 3),
+    round(-0.3273, 3)
+  )
+)
+
+# Display table
+kable(arima_summary, align = "ll",
+      caption = "Table: ARIMA(0,0,0) Model Summary for NYC Pollution Forecast") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "responsive"),
+                full_width = FALSE, position = "center")
+
+```
+
+
+\newpage
+Multilevel Modeling
+```{r, warning=FALSE, message=FALSE}
+# Multilevel Modeling with Diagnostics
+
+library(lme4)
+library(car)
+
+# 1. Check multicollinearity
+lm_model <- lm(Data_Value ~ EV_Station_Density + Public_Pct + Time_Since_EV_Adoption, data = model_data)
+vif(lm_model)
+
+# 2. Fit mixed-effects model with random slope for Time_Since_EV_Adoption
+mixed_model <- lmer(Data_Value ~ EV_Station_Density + Public_Pct + Time_Since_EV_Adoption +
+                      (Time_Since_EV_Adoption | Geo.Place.Name), data = model_data)
+summary(mixed_model)
+
+# 3. Model diagnostics
+
+# Q-Q plot for normality of residuals
+qqnorm(resid(mixed_model))
+qqline(resid(mixed_model))
+
+# Residual vs fitted plot
+plot(mixed_model)
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(knitr)
+library(kableExtra)
+# Fixed effects summary directly from model
+fixef_summary <- summary(mixed_model)$coefficients
+
+# Print with kable (no relabeling)
+library(kableExtra)
+
+kable(fixef_summary, digits = 3, caption = "Fixed Effects (from `mixed model`)", booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F) %>%
+  row_spec(which(rownames(fixef_summary) == "Time_Since_EV_Adoption"), bold = TRUE)
+
+```
+
+```{r, warning=FALSE, message=FALSE}
+library(knitr)
+library(kableExtra)
+# Get variance components directly
+rand_eff <- VarCorr(mixed_model)
+rand_df <- as.data.frame(rand_eff)
+
+kable(rand_df[, c("grp", "var1", "vcov")], digits = 3,
+      col.names = c("Group", "Effect", "Variance"),
+      caption = "Random Effects (from `mixed model`)", booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+
+
+library(knitr)
+library(kableExtra)
+
+# Assuming rand_eff <- VarCorr(mixed_model)
+rand_df <- data.frame(
+  Group = c("Geo.Place.Name", "Geo.Place.Name", "Residual"),
+  Effect = c("(Intercept)", "Time_Since_EV_Adoption", ""),
+  Variance = c(41.9321, 0.8715, 504.2450)
+)
+
+# Generate the table
+kable(rand_df, digits = 3,
+      col.names = c("Group", "Effect", "Variance"),
+      caption = "Random Effects (from `mixed model`)", booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+
+```
+
+
+
+
+\newpage
+Causal Inference (DiD)
+```{r, warning=FALSE, message=FALSE}
+# Define treatment group: top 25% EV density
+quantile_cutoff <- quantile(model_data$EV_Station_Density, 0.75, na.rm = TRUE)
+
+model_data <- model_data %>%
+  mutate(Treatment = ifelse(EV_Station_Density >= quantile_cutoff, 1, 0),
+         Post = ifelse(Year >= 2018, 1, 0),
+         DiD = Treatment * Post)
+
+# Run DiD regression
+did_model <- lm(Data_Value ~ Treatment + Post + DiD + factor(BOROUGH) + factor(Year), data = model_data)
+summary(did_model)
+```
+
+
+ DiD Visualization: Pollution Trends by Treatment Group
+```{r, warning=FALSE, message=FALSE}
+model_data %>%
+  group_by(Year, Treatment) %>%
+  summarise(Pollution = mean(Data_Value, na.rm = TRUE)) %>%
+  ggplot(aes(x = Year, y = Pollution, color = as.factor(Treatment), linetype = as.factor(Treatment))) +
+  geom_line(size = 1.2) +
+  geom_point(size = 2) +
+  labs(title = "Trends in Pollution by Treatment Group (Pre vs Post)",
+       x = "Year", y = "Average Pollution",
+       color = "Treatment Group", linetype = "Treatment Group") +
+  scale_color_manual(values = c("0" = "gray40", "1" = "steelblue"),
+                     labels = c("Control", "Treated")) +
+  scale_linetype_manual(values = c("0" = "dashed", "1" = "solid"),
+                        labels = c("Control", "Treated")) +
+  theme_minimal()
+```
+
+
+2. Strengthened DiD Analysis (2014-2024)
+```{r}
+# Define treatment groups more rigorously
+collapsed_data <- model_data %>%
+  group_by(BOROUGH, Year) %>%
+  summarise(
+    Data_Value = mean(Data_Value, na.rm = TRUE),
+    EV_Station_Density = mean(EV_Station_Density, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Treatment = ifelse(Year >= 2018 & EV_Station_Density > median(EV_Station_Density[Year >= 2018], na.rm = TRUE), 1, 0),
+    Post = ifelse(Year >= 2018, 1, 0),
+    DiD = Treatment * Post
+  )
+
+# Check treatment assignment
+table(collapsed_data$Treatment, collapsed_data$BOROUGH, collapsed_data$Year)
+
+# Improved DiD model with borough and year fixed effects
+library(lfe)
+did_model_fixed <- felm(Data_Value ~ DiD | BOROUGH + Year, data = collapsed_data)
+summary(did_model_fixed)
+
+# Visualize parallel trends with error handling
+parallel_trends <- model_data %>%
+  group_by(Year, Treatment) %>%
+  summarise(
+    Mean_Pollution = mean(Data_Value, na.rm = TRUE),
+    SE = sd(Data_Value, na.rm = TRUE)/sqrt(n()),
+    .groups = 'drop'
+  )
+
+ggplot(parallel_trends, aes(x = Year, y = Mean_Pollution, 
+                          color = factor(Treatment), 
+                          linetype = factor(Treatment))) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = Mean_Pollution - 1.96*SE,
+                  ymax = Mean_Pollution + 1.96*SE,
+                  fill = factor(Treatment)),
+              alpha = 0.2) +
+  geom_vline(xintercept = 2018, linetype = "dashed", color = "red") +
+  labs(title = "Parallel Trends Assumption Check (2014-2024)",
+       subtitle = "Dashed line marks policy implementation year (2018)",
+       x = "Year",
+       y = "Mean Pollution Level (ppb)",
+       color = "Treatment Group",
+       linetype = "Treatment Group",
+       fill = "Treatment Group") +
+  scale_color_manual(values = c("0" = "#E69F00", "1" = "#0072B2")) +
+  scale_fill_manual(values = c("0" = "#E69F00", "1" = "#0072B2")) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+
+# Cluster standard errors at borough level
+did_model_clustered <- lfe::felm(Data_Value ~ DiD | BOROUGH + Year, data = collapsed_data)
+summary(did_model_clustered, robust = TRUE)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+library(kableExtra)
+
+# Extract full model summary
+did_summary <- summary(did_model)$coefficients
+did_df <- as.data.frame(did_summary)
+did_df$Term <- rownames(did_df)
+rownames(did_df) <- NULL
+
+# Reorder columns
+did_df <- did_df[, c("Term", "Estimate", "Std. Error", "Pr(>|t|)")]
+colnames(did_df) <- c("Term", "Estimate", "Std_Error", "p_value")
+
+# Initialize table
+highlighted_table <- kable(did_df, digits = 3, caption = "Full DiD Regression Results (Highlighted)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "hover"), full_width = F)
+
+# Highlight DiD in yellow
+highlighted_table <- highlighted_table %>%
+  row_spec(which(did_df$Term == "DiD"), bold = TRUE, background = "#F9F871")
+
+# Highlight other significant terms (p < 0.05) in light gray
+signif_rows <- which(did_df$p_value < 0.05 & did_df$Term != "DiD")
+highlighted_table <- highlighted_table %>%
+  row_spec(signif_rows, bold = TRUE, background = "#F9F")
+
+# Display table
+highlighted_table
+
+```
+
+
+
+
+\newpage
+Geospatial Analysis: EV Station Growth in NYC (2020–2024)
+
+```{r, warning=FALSE, message=FALSE}
+# Load necessary packages
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(ggplot2)
+library(sf)
+library(leaflet)
+library(viridis)
+
+# Step 1: Load and clean EV station data
+ev_geo_data <- read_csv("EV_CS_NYC.csv") %>%
+  mutate(
+    Open_Date = mdy(`Open Date`),
+    Open_Year = year(Open_Date),
+    City = str_to_upper(str_trim(City)),
+    BOROUGH = case_when(
+      City %in% c("NEW YORK", "MANHATTAN") ~ "MANHATTAN",
+      City == "BROOKLYN" ~ "BROOKLYN",
+      City == "BRONX" ~ "BRONX",
+      City == "QUEENS" ~ "QUEENS",
+      City == "STATEN ISLAND" ~ "STATEN ISLAND",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(Open_Year >= 2014 & Open_Year <= 2024, !is.na(BOROUGH)) %>%
+  select(Station_Name = `Station Name`, Open_Date, Open_Year, BOROUGH, Latitude, Longitude,
+         `EV Level2 EVSE Num`, `EV DC Fast Count`, `Groups With Access Code`)
+
+# Save for external use (optional)
+write_csv(ev_geo_data, "EV_Station_Data_with_Geolocation.csv")
+
+```
+
+
+Basic Static Plot: EV Station Locations by Borough
+```{r, warning=FALSE, message=FALSE}
+ggplot(ev_geo_data, aes(x = Longitude, y = Latitude, color = BOROUGH)) +
+  geom_point(alpha = 0.6, size = 2) +
+  labs(title = "EV Charging Stations in NYC (2020–2024)",
+       subtitle = "Color-coded by Borough") +
+  theme_minimal() +
+  coord_fixed()
+
+```
+
+
+Facet by Year: Visualize Station Growth
+```{r, warning=FALSE, message=FALSE}
+ggplot(ev_geo_data, aes(x = Longitude, y = Latitude, color = BOROUGH)) +
+  geom_point(alpha = 0.5, size = 1.5) +
+  facet_wrap(~ Open_Year) +
+  labs(title = "EV Charging Station Expansion by Year",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal() +
+  coord_fixed()
+
+```
+
+
+
+Add Borough Boundaries
+```{r, warning=FALSE, message=FALSE}
+# Load NYC borough shapefile or GeoJSON — change path to your file
+nyc_boroughs <- st_read("Borough Boundaries_20250417.geojson") 
+
+ggplot() +
+  geom_sf(data = nyc_boroughs, fill = "gray95", color = "black") +
+  geom_point(data = ev_geo_data, aes(x = Longitude, y = Latitude, color = BOROUGH), size = 1.5, alpha = 0.6) +
+  labs(title = "EV Charging Stations in NYC with Borough Boundaries",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal() +
+  coord_sf()
+
+```
+
+
+Interactive Map
+```{r, warning=FALSE, message=FALSE}
+leaflet_map <-leaflet(ev_geo_data) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addCircleMarkers(
+    ~Longitude, ~Latitude,
+    color = ~case_when(
+      BOROUGH == "MANHATTAN" ~ "blue",
+      BOROUGH == "BROOKLYN" ~ "green",
+      BOROUGH == "QUEENS" ~ "orange",
+      BOROUGH == "BRONX" ~ "red",
+      BOROUGH == "STATEN ISLAND" ~ "purple",
+      TRUE ~ "gray"
+    ),
+    radius = 4, stroke = FALSE, fillOpacity = 0.7,
+    popup = ~paste0("<b>Station:</b> ", Station_Name,
+                    "<br><b>Borough:</b> ", BOROUGH,
+                    "<br><b>Year:</b> ", Open_Year)
+  ) %>%
+  addLegend("bottomright", 
+            colors = c("blue", "green", "orange", "red", "purple"),
+            labels = c("Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"),
+            title = "NYC Boroughs")
+leaflet_map
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+library(htmlwidgets)
+library(webshot2)
+
+# Save the leaflet map as an HTML file
+saveWidget(leaflet_map, "EV_Stations_Map.html", selfcontained = TRUE)
+
+# Convert that HTML file to a PNG (requires webshot2 and Chrome)
+webshot("EV_Stations_Map.html", file = "EV_Stations_Map.png", vwidth = 1200, vheight = 800)
+```
+
+
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(leaflet)
+library(dplyr)
+
+# Example dataset: assuming 'data' contains year, borough, and pollutant concentration data
+data <- read.csv("Clean_Model_Ready_EV_AQ_Data.csv")
+
+# Define the years and pollutants (adjust based on the 'Name' column values)
+years <- 2014:2024
+pollutants <- c("Fine particles (PM 2.5)", "Nitrogen dioxide (NO2)")
+
+# Loop over each pollutant and year to generate the plots
+for (pollutant in pollutants) {
+  for (year in years) {
+    
+    # Filter data for the specific year and pollutant
+    data_year_pollutant <- data %>% 
+      filter(Year == year & Name == pollutant) %>%
+      select(Geo.Place.Name, Data_Value)
+    
+    # Check if the filtered data is empty
+    if (nrow(data_year_pollutant) > 0) {
+      
+      # Create the plot (e.g., bar plot for simplicity, adjust based on needs)
+      map <- ggplot(data_year_pollutant, aes(x = Geo.Place.Name, y = Data_Value)) +
+        geom_bar(stat = "identity", fill = "blue", alpha = 0.7) +
+        labs(title = paste(pollutant, "Concentration in", year),
+             x = "Location", y = paste(pollutant, "Concentration")) +
+        theme_minimal() +
+        theme(axis.text.x = element_text(angle = 45, hjust = 1))
+      
+      # Display the plot in R
+      print(map)
+      
+      # Optionally, save the map as a PNG image (commented out for now)
+      # ggsave(paste0(pollutant, "_Map_", year, ".png"), plot = map, width = 8, height = 6, dpi = 300)
+    } else {
+      message(paste("No data for", pollutant, "in", year))
+    }
+  }
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
